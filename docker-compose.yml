@@ -24,8 +24,6 @@ services:
       db:
         condition: service_healthy
     env_file: [.env]
-    volumes:
-      - ./data.xlsx:/app/data.xlsx:ro
 
   app:
     build: .
