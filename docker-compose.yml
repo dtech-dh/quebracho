@@ -17,14 +17,14 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
-  etl:
-    build: .
-    container_name: mcp-pg-etl
-    command: ["python", "etl.py"]
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file: [.env]
+#  etl:
+#    build: .
+#    container_name: mcp-pg-etl
+#    command: ["python", "etl.py"]
+#    depends_on:
+#      db:
+#        condition: service_healthy
+#    env_file: [.env]
 
   api:
     build: ./backend

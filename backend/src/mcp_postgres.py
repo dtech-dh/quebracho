@@ -52,7 +52,7 @@ class PostgresMCP:
 
     def build_sql(self, mini: str) -> str:
         # (idéntico al tuyo, sin cambios importantes)
-        ...
+        # sql = f'SELECT * FROM "{self.table}"'
         return sql + ";"
 
     def run_sql(self, mini: str):
