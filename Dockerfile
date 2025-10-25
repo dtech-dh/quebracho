@@ -13,5 +13,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./src/. ./
+COPY ./src/data.xlsx ./data.xlsx
 COPY ./data/. /data/.
 EXPOSE 8501
