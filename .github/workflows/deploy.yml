@@ -1,4 +1,4 @@
-name: Deploy Quebracho
+name: 🚀 Deploy Quebracho
 
 on:
   push:
@@ -11,63 +11,68 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ==============================
+      # 📦 Checkout del código
+      # ==============================
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ✅ Validación de secrets
+      # ==============================
+      # ✅ Validar secrets
+      # ==============================
       - name: Validar secrets del repositorio
         run: |
           missing=0
-          if [ -z "${{ secrets.DOCKER_HUB_USER }}" ]; then
-            echo "❌ Falta DOCKER_HUB_USER"
-            missing=1
-          fi
-          if [ -z "${{ secrets.DOCKER_HUB_TOKEN }}" ]; then
-            echo "❌ Falta DOCKER_HUB_TOKEN"
-            missing=1
-          fi
-          if [ -z "${{ secrets.DO_HOST }}" ]; then
-            echo "❌ Falta DO_HOST"
-            missing=1
-          fi
-          if [ -z "${{ secrets.DO_USER }}" ]; then
-            echo "❌ Falta DO_USER"
-            missing=1
-          fi
-          if [ -z "${{ secrets.DO_SSH_KEY }}" ]; then
-            echo "❌ Falta DO_SSH_KEY"
-            missing=1
-          fi
-          if [ -z "${{ secrets.GH_PAT }}" ]; then
-            echo "❌ Falta GH_PAT"
-            missing=1
-          fi
-          if [ -z "${{ secrets.DOTENV }}" ]; then
-            echo "❌ Falta DOTENV"
-            missing=1
-          fi
+          for var in DOCKER_HUB_USER DOCKER_HUB_TOKEN DO_HOST DO_USER DO_SSH_KEY GH_PAT DOTENV; do
+            if [ -z "${{ secrets[$var] }}" ]; then
+              echo "❌ Falta $var"
+              missing=1
+            fi
+          done
           if [ $missing -ne 0 ]; then
             echo "❌ Faltan variables obligatorias, abortando workflow."
             exit 1
           fi
           echo "✅ Todos los secrets requeridos están definidos"
 
-      # 🔑 Login a Docker Hub
+      # ==============================
+      # 🔑 Login en Docker Hub
+      # ==============================
       - name: Log in en Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USER }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      # 🐳 Build & Push imagen a Docker Hub
-      - name: Build & Push Docker image
+      # ==============================
+      # 🐳 Build & Push backend
+      # ==============================
+      - name: Build & Push backend image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./backend
+          file: ./backend/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USER }}/quebracho:latest
+          tags: ${{ secrets.DOCKER_HUB_USER }}/quebracho-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # 🚀 Deploy remoto en Droplet
+      # ==============================
+      # 🐳 Build & Push frontend
+      # ==============================
+      - name: Build & Push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USER }}/quebracho-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ==============================
+      # 🚀 Deploy remoto al Droplet
+      # ==============================
       - name: Deploy to Droplet
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -75,9 +80,13 @@ jobs:
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           script: |
+            set -e
+            echo "🚀 Iniciando deploy en $HOSTNAME..."
+
             mkdir -p /srv/quebracho
+
             if [ ! -d "/srv/quebracho/.git" ]; then
-              echo "📥 Primera implementación: clonando repo con GH_PAT..."
+              echo "📥 Clonando repo por primera vez..."
               rm -rf /srv/quebracho
               git clone https://oauth2:${{ secrets.GH_PAT }}@github.com/dtech-dh/quebracho.git /srv/quebracho
             else
@@ -87,11 +96,19 @@ jobs:
               git pull https://oauth2:${{ secrets.GH_PAT }}@github.com/dtech-dh/quebracho.git main
             fi
 
-            # 🔑 Generar .env desde secret
+            echo "🧩 Generando .env..."
             echo "${{ secrets.DOTENV }}" > /srv/quebracho/.env
-            echo "${{ secrets.DOTENV }}" > /srv/quebracho/src/.env
+            echo "${{ secrets.DOTENV }}" > /srv/quebracho/backend/src/.env
+            echo "${{ secrets.DOTENV }}" > /srv/quebracho/frontend/src/.env
 
             cd /srv/quebracho
-            echo "🐳 Deploy con Docker Compose..."
+
+            echo "🐳 Actualizando imágenes desde Docker Hub..."
             docker compose pull
-            docker compose up -d
+
+            echo "⚙️ Levantando contenedores..."
+            docker compose up -d --build
+
+            echo "✅ Estado final:"
+            docker compose ps
+            docker system prune -f
