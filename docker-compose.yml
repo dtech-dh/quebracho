@@ -29,9 +29,6 @@ services:
     build: .
     container_name: mcp-pg-app
     command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
-    depends_on:
-      etl:
-        condition: service_completed_successfully
     env_file: [.env]
     ports:
       - 8001:8501
