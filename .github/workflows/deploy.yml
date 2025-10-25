@@ -20,20 +20,30 @@ jobs:
       # ==============================
       # ✅ Validar secrets
       # ==============================
-      - name: Validar secrets del repositorio
+      - name: ✅ Validar secrets del repositorio
         run: |
           missing=0
-          for var in DOCKER_HUB_USER DOCKER_HUB_TOKEN DO_HOST DO_USER DO_SSH_KEY GH_PAT DOTENV; do
-            if [ -z "${{ secrets[$var] }}" ]; then
-              echo "❌ Falta $var"
+          check_secret() {
+            if [ -z "$1" ]; then
+              echo "❌ Falta $2"
               missing=1
             fi
-          done
+          }
+
+          check_secret "${{ secrets.DOCKER_HUB_USER }}" "DOCKER_HUB_USER"
+          check_secret "${{ secrets.DOCKER_HUB_TOKEN }}" "DOCKER_HUB_TOKEN"
+          check_secret "${{ secrets.DO_HOST }}" "DO_HOST"
+          check_secret "${{ secrets.DO_USER }}" "DO_USER"
+          check_secret "${{ secrets.DO_SSH_KEY }}" "DO_SSH_KEY"
+          check_secret "${{ secrets.GH_PAT }}" "GH_PAT"
+          check_secret "${{ secrets.DOTENV }}" "DOTENV"
+
           if [ $missing -ne 0 ]; then
             echo "❌ Faltan variables obligatorias, abortando workflow."
             exit 1
           fi
-          echo "✅ Todos los secrets requeridos están definidos"
+          echo "✅ Todos los secrets requeridos están definidos correctamente."
+
 
       # ==============================
       # 🔑 Login en Docker Hub
