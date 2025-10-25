@@ -57,6 +57,14 @@ jobs:
       # ==============================
       # 🐳 Build & Push backend
       # ==============================
+      # 🔧 Configurar builder BuildKit
+      - name: Configurar builder BuildKit
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:rootless
+
+      # 🐳 Build & Push backend
       - name: Build & Push backend image
         uses: docker/build-push-action@v6
         with:
@@ -67,9 +75,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ==============================
       # 🐳 Build & Push frontend
-      # ==============================
       - name: Build & Push frontend image
         uses: docker/build-push-action@v6
         with:
@@ -79,6 +85,7 @@ jobs:
           tags: ${{ secrets.DOCKER_HUB_USER }}/quebracho-frontend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
 
       # ==============================
       # 🚀 Deploy remoto al Droplet
