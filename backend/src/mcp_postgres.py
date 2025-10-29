@@ -1,5 +1,4 @@
-import os
-import re
+import os, re
 import pandas as pd
 from sqlalchemy import create_engine, text #type: ignore
 from dotenv import load_dotenv
@@ -9,22 +8,9 @@ load_dotenv()
 class PostgresMCP:
     """
     MCP (Mini Command Processor) para ejecutar consultas simplificadas sobre una tabla de Postgres.
-
-    Funcionalidad principal:
-    - Recibe una 'mini consulta SQL' (ej. SELECT SUM(Amount) WHERE Year=2025 GROUP BY Month)
-    - La convierte en SQL válida para Postgres.
-    - Ejecuta y devuelve los resultados como DataFrame de pandas.
-
-    Columnas admitidas y funciones soportadas:
-      SELECT [DISTINCT] col | SUM(col)|AVG|MAX|MIN|COUNT(*)|COUNT(col)|COUNT(DISTINCT col)
-      WHERE Year=YYYY [AND Month=M] [AND Date='YYYY-MM-DD'] [AND Date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD']
-      GROUP BY Year|Month|Day|col
-      ORDER BY <col|SUM(col)|COUNT(...)|...> [ASC|DESC]
-      LIMIT N
     """
 
     def __init__(self):
-        # Configuración básica desde .env
         DB = os.getenv("POSTGRES_DB")
         USER = os.getenv("POSTGRES_USER")
         PWD = os.getenv("POSTGRES_PASSWORD")
@@ -32,27 +18,20 @@ class PostgresMCP:
         PORT = os.getenv("POSTGRES_PORT", "5432")
         self.table = os.getenv("TABLE_NAME", "ventas")
 
-        # Conexión SQLAlchemy
         self.engine = create_engine(f"postgresql+psycopg2://{USER}:{PWD}@{HOST}:{PORT}/{DB}")
 
-        # Cache de columnas
         with self.engine.begin() as conn:
             cols = conn.execute(text(f'SELECT * FROM "{self.table}" LIMIT 0')).keys()
         self.columns = set(cols)
 
     # -------------------------------------------------------------------------
-    # Resolución interna de nombres de columnas
-    # -------------------------------------------------------------------------
     def _resolve_col(self, col: str) -> str:
-        """Busca la columna real en la base respetando mayúsculas/minúsculas."""
-        col = col.strip()
         for c in self.columns:
-            if c.lower() == col.lower():
+            if c.lower() == col.strip().lower():
                 return c
-        return col
+        return col.strip()
 
     def _resolve_agg(self, expr: str) -> str:
-        """Ejemplo: SUM(Amount) -> SUM("Amount")"""
         inner = re.search(r"\(\s*([^)]+)\s*\)", expr)
         func = expr.split("(")[0].upper()
         col = inner.group(1).strip() if inner else ""
@@ -66,33 +45,30 @@ class PostgresMCP:
         return f'{func}("{match}")'
 
     # -------------------------------------------------------------------------
-    # Construcción del SQL real a partir de la consulta mini
-    # -------------------------------------------------------------------------
     def build_sql(self, mini: str) -> str:
         raw = mini.strip()
         low = raw.lower()
 
-        # --- SELECT ---
+        # SELECT
         m_sel = re.search(r"select\s+(.+?)(\s+where|\s+group by|\s+order by|\s+limit|$)", low, flags=re.S)
         select_txt = m_sel.group(1).strip() if m_sel else "*"
 
-        # --- WHERE ---
+        # WHERE
         where_section = ""
         m_where = re.search(r"where\s+(.+?)(\s+group by|\s+order by|\s+limit|$)", low, flags=re.S)
         if m_where:
             where_section = m_where.group(1).strip()
 
-        # --- GROUP BY ---
+        # GROUP BY
         group_by = None
         m_gb = re.search(r"group\s+by\s+(.+?)(\s+order by|\s+limit|$)", low, flags=re.S)
         if m_gb:
             group_expr = m_gb.group(1).strip()
             group_by = self._resolve_col(group_expr)
 
-        # --- SELECT columns ---
+        # SELECT cols
         select_cols = []
         aggs = re.findall(r"(sum|avg|max|min|count)\s*\(\s*([^)]+)\s*\)", select_txt, flags=re.I)
-
         if aggs:
             for fn, col in aggs:
                 fn_up = fn.upper()
@@ -115,24 +91,20 @@ class PostgresMCP:
         if group_by and f'"{group_by}"' not in select_cols:
             select_cols.insert(0, f'"{group_by}"')
 
-        # --- FROM ---
         sql = "SELECT " + ", ".join(select_cols) + f' FROM "{self.table}"'
 
-        # --- WHERE ---
+        # WHERE clauses
         where_clauses = []
         if where_section:
             m_year = re.search(r"year\s*=\s*(\d{4})", where_section)
             if m_year:
                 where_clauses.append(f'"Year"={int(m_year.group(1))}')
-
             m_month = re.search(r"month\s*=\s*([0-9]{1,2})", where_section)
             if m_month:
                 where_clauses.append(f'"Month"={int(m_month.group(1))}')
-
             m_date = re.search(r"date\s*=\s*'([\d\-]+)'", where_section)
             if m_date:
                 where_clauses.append(f'"Date"::date = DATE \'{m_date.group(1)}\'')
-
             m_between = re.search(r"between\s*'([\d\-]+)'\s*and\s*'([\d\-]+)'", where_section)
             if m_between:
                 a, b = m_between.groups()
@@ -141,44 +113,28 @@ class PostgresMCP:
         if where_clauses:
             sql += " WHERE " + " AND ".join(where_clauses)
 
-        # --- GROUP BY ---
         if group_by:
             sql += f' GROUP BY "{group_by}"'
 
-        # --- ORDER BY ---
         m_ob = re.search(r"order\s+by\s+([a-zA-Z0-9_\(\) ]+)(\s+asc|\s+desc)?", low)
         if m_ob:
             ob_key = m_ob.group(1).strip()
             ob_dir = " DESC" if m_ob.group(2) and "desc" in m_ob.group(2).lower() else " ASC"
-
-            if ob_key.lower().startswith(("sum(", "avg(", "max(", "min(", "count(")):
-                ob_sql = self._resolve_agg(ob_key)
-            else:
-                ob_sql = f'"{self._resolve_col(ob_key)}"'
-
+            ob_sql = self._resolve_agg(ob_key) if ob_key.lower().startswith(("sum(", "avg(", "max(", "min(", "count(")) else f'"{self._resolve_col(ob_key)}"'
             if group_by in ("Month", "Year", "Day", "Date"):
                 ob_sql = f'"{group_by}"'
                 ob_dir = " ASC"
-
             sql += f" ORDER BY {ob_sql}{ob_dir}"
         elif group_by in ("Month", "Year", "Day", "Date"):
             sql += f' ORDER BY "{group_by}" ASC'
 
-        # --- LIMIT ---
         m_lim = re.search(r"limit\s+(\d+)", low)
         if m_lim:
             sql += f" LIMIT {int(m_lim.group(1))}"
 
         return sql + ";"
 
-    # -------------------------------------------------------------------------
-    # Ejecución
-    # -------------------------------------------------------------------------
     def run_sql(self, mini: str) -> pd.DataFrame:
-        """
-        Ejecuta una mini-consulta traducida y devuelve un DataFrame.
-        Captura y reporta errores SQL de forma segura.
-        """
         try:
             sql = self.build_sql(mini)
             with self.engine.begin() as conn:
@@ -187,17 +143,13 @@ class PostgresMCP:
         except Exception as e:
             return pd.DataFrame({"error": [str(e)], "sql": [mini]})
 
-# -------------------------------------------------------------------------
-# Utilidad independiente: obtener esquema de una tabla
-# -------------------------------------------------------------------------
+
 def get_table_schema(table_name: str):
-    """Devuelve lista de columnas y tipos de una tabla PostgreSQL."""
     DB = os.getenv("POSTGRES_DB")
     USER = os.getenv("POSTGRES_USER")
     PWD = os.getenv("POSTGRES_PASSWORD")
     HOST = os.getenv("POSTGRES_HOST", "db")
     PORT = os.getenv("POSTGRES_PORT", "5432")
-
     engine = create_engine(f"postgresql+psycopg2://{USER}:{PWD}@{HOST}:{PORT}/{DB}")
     query = text("""
         SELECT column_name, data_type
