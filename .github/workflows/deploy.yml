@@ -117,6 +117,8 @@ jobs:
             echo "${{ secrets.DOTENV }}" > /srv/quebracho/.env
             echo "${{ secrets.DOTENV }}" > /srv/quebracho/backend/src/.env
             echo "${{ secrets.DOTENV }}" > /srv/quebracho/frontend/src/.env
+            echo "🔐 Inyectando service_account.json para ETL..."
+            echo '${{ secrets.GSHEET_SERVICE_ACCOUNT_JSON }}' > /srv/quebracho/etl/service_account.json
 
             cd /srv/quebracho
 
