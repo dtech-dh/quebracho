@@ -86,6 +86,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # 🐳 Build & Push ETL
+      - name: Build & Push ETL image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./etl
+          file: ./etl/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USER }}/quebracho-etl:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
 
       # ==============================
       # 🚀 Deploy remoto al Droplet
