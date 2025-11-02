@@ -112,7 +112,7 @@ Usuario: {prompt}
 Acción planificada: {json.dumps(plan, indent=2, ensure_ascii=False)}
 Datos disponibles: {data.head(10).to_dict(orient='records') if data is not None and hasattr(data, 'head') else 'Sin datos o error.'}
 
-Resumí en lenguaje comercial claro, destacando hallazgos relevantes y contexto de negocio.
+Resumí en lenguaje comercial claro, destacando hallazgos relevantes y contexto de negocio (solo si fue necesario, sino mantenete claro y conciso).
 """
 
     try:

@@ -110,17 +110,17 @@ class PostgresMCP:
         if where_section:
             m_year = re.search(r"year\s*=\s*(\d{4})", where_section)
             if m_year:
-                where_clauses.append(f'"Year"={int(m_year.group(1))}')
+                where_clauses.append(f'"year"={int(m_year.group(1))}')
             m_month = re.search(r"month\s*=\s*([0-9]{1,2})", where_section)
             if m_month:
-                where_clauses.append(f'"Month"={int(m_month.group(1))}')
+                where_clauses.append(f'"month"={int(m_month.group(1))}')
             m_date = re.search(r"date\s*=\s*'([\d\-]+)'", where_section)
             if m_date:
-                where_clauses.append(f'"Date"::date = DATE \'{m_date.group(1)}\'')
+                where_clauses.append(f'"date"::date = DATE \'{m_date.group(1)}\'')
             m_between = re.search(r"between\s*'([\d\-]+)'\s*and\s*'([\d\-]+)'", where_section)
             if m_between:
                 a, b = m_between.groups()
-                where_clauses.append(f'"Date" BETWEEN DATE \'{a}\' AND DATE \'{b}\'')
+                where_clauses.append(f'"date" BETWEEN DATE \'{a}\' AND DATE \'{b}\'')
 
         if where_clauses:
             sql += " WHERE " + " AND ".join(where_clauses)
@@ -139,11 +139,11 @@ class PostgresMCP:
                 if ob_key.lower().startswith(("sum(", "avg(", "max(", "min(", "count("))
                 else f'"{self._resolve_col(ob_key)}"'
             )
-            if group_by in ("Month", "Year", "Day", "Date"):
+            if group_by in ("month", "year", "day", "date"):
                 ob_sql = f'"{group_by}"'
                 ob_dir = " ASC"
             sql += f" ORDER BY {ob_sql}{ob_dir}"
-        elif group_by in ("Month", "Year", "Day", "Date"):
+        elif group_by in ("month", "year", "day", "date"):
             sql += f' ORDER BY "{group_by}" ASC'
 
         # LIMIT

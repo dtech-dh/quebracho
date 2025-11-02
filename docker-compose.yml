@@ -46,8 +46,6 @@ services:
   etl-worker:
     build: ./etl
     container_name: etl-worker
-    depends_on:
-      - db
     restart: unless-stopped
     env_file: [.env]
 

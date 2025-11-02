@@ -9,10 +9,10 @@ import logging
 import datetime
 import pandas as pd
 import psycopg2
-import pyodbc #type: ignore
+import pyodbc  # type: ignore
 import hashlib
 from dotenv import load_dotenv
-from apscheduler.schedulers.blocking import BlockingScheduler #type: ignore
+from apscheduler.schedulers.blocking import BlockingScheduler  # type: ignore
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -35,11 +35,14 @@ POSTGRES_CONFIG = {
 
 TARGET_TABLE = os.getenv("POSTGRES_TARGET_TABLE", "ventas")
 
+
 def hash_row(row):
     concat = "|".join([str(row[col]) for col in row.index])
     return hashlib.sha256(concat.encode("utf-8")).hexdigest()
 
+
 def ensure_pg_table(conn, df: pd.DataFrame):
+    df.columns = [c.lower() for c in df.columns]
     cols = df.columns.tolist()
     col_defs = []
     for c in cols:
@@ -56,6 +59,7 @@ def ensure_pg_table(conn, df: pd.DataFrame):
         cur.execute(ddl)
     conn.commit()
     logging.info(f"Tabla {TARGET_TABLE} verificada/creada.")
+
 
 def fetch_data():
     start = datetime.datetime.now() - datetime.timedelta(hours=4)
@@ -83,10 +87,12 @@ def fetch_data():
         logging.info("Sin nuevas filas.")
         return None
 
-    df["Month"] = pd.to_datetime(df["Date"], errors='coerce').dt.strftime("%Y-%m")
+    df.columns = [c.lower() for c in df.columns]
+    df["month"] = pd.to_datetime(df["date"], errors='coerce').dt.strftime("%Y-%m")
     df["row_hash"] = df.apply(hash_row, axis=1)
     logging.info(f"{len(df)} filas leídas.")
     return df
+
 
 def initial_diagnostics():
     logging.info("===== Diagnóstico inicial =====")
@@ -128,14 +134,15 @@ def initial_diagnostics():
         columns = [row[0] for row in cursor.fetchall()]
         logging.info(f"Destino [{TARGET_TABLE}] columnas: {columns}")
         logging.info(f"Destino [{TARGET_TABLE}] cantidad de registros: {count}")
-        logging.info(f"Destino [{TARGET_TABLE}] cantidad de registros: {count}")
         conn.close()
     except Exception as e:
         logging.error(f"Error al conectar con PostgreSQL: {e}")
 
     logging.info("===== Fin diagnóstico =====")
 
+
 def load_to_pg(df: pd.DataFrame):
+    df.columns = [c.lower() for c in df.columns]
     conn = psycopg2.connect(
         host=POSTGRES_CONFIG["host"],
         port=POSTGRES_CONFIG["port"],
@@ -159,6 +166,7 @@ def load_to_pg(df: pd.DataFrame):
     conn.close()
     logging.info(f"{len(df)} filas procesadas (con deduplicación por hash).")
 
+
 def job():
     try:
         df = fetch_data()
@@ -168,6 +176,7 @@ def job():
             logging.info("No hay datos nuevos para insertar.")
     except Exception as e:
         logging.exception("Error durante el ETL.")
+
 
 if __name__ == "__main__":
     initial_diagnostics()
