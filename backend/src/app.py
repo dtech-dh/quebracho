@@ -1,4 +1,4 @@
-from fastapi import FastAPI #type: ignore
+from fastapi import FastAPI  # type: ignore
 from router_ai import router as ai_router
 from mcp_postgres import PostgresMCP, get_table_schema
 

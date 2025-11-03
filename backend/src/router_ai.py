@@ -1,6 +1,6 @@
 import logging, asyncio
-from fastapi import APIRouter, HTTPException #type: ignore
-from pydantic import BaseModel #type: ignore
+from fastapi import APIRouter, HTTPException  # type: ignore
+from pydantic import BaseModel  # type: ignore
 from analyzer_ai import analyze_query
 
 router = APIRouter()
@@ -19,6 +19,8 @@ async def chat(req: ChatRequest):
 
     try:
         result = await asyncio.wait_for(analyze_query(prompt), timeout=90)
+        if result.get("sql") and "error" in result.get("sql", "").lower():
+            raise HTTPException(status_code=400, detail="Consulta SQL inválida")
 
         return {
             "plan": result.get("plan"),

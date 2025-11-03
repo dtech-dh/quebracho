@@ -1,5 +1,5 @@
 import json, os, logging
-from openai import OpenAI #type: ignore
+from openai import OpenAI  # type: ignore
 from dotenv import load_dotenv
 from mcp_postgres import get_table_schema, PostgresMCP
 
@@ -40,8 +40,7 @@ Tu tarea es analizar la siguiente pregunta y devolver SOLO un JSON válido con e
 Reglas:
 - Si la pregunta requiere datos o cálculos, usá "query_postgres" y "need_data": true.
 - Si es conceptual o general, usá "summary" y "need_data": false.
-- La consulta SQL debe ser simple y válida, por ejemplo:
-  "SELECT SUM(Amount) WHERE Year=2025 AND Month=9;"
+- La consulta SQL debe ser simple, válida y compatible con Postgres (respetá mayúsculas y comillas).
 - Si no se menciona un año, asumí el actual.
 - Siempre devolvé un JSON perfectamente formateado y válido.
 
@@ -84,8 +83,10 @@ Pregunta: {prompt}
         try:
             sql_resp = client.chat.completions.create(
                 model=MODEL,
-                messages=[{"role": "system", "content": "Traductor de lenguaje natural a SQL simplificada"},
-                          {"role": "user", "content": sql_prompt}],
+                messages=[
+                    {"role": "system", "content": "Traductor de lenguaje natural a SQL simplificada"},
+                    {"role": "user", "content": sql_prompt}
+                ],
                 temperature=0
             )
             sql = sql_resp.choices[0].message.content.strip().splitlines()[0]
@@ -96,15 +97,31 @@ Pregunta: {prompt}
             logging.error(f"❌ Error al intentar generar SQL forzada: {e}")
             sql = None
 
-    # --- Ejecutar SQL si existe
+    # --- Validación SQL antes de ejecutar
     data = None
     if sql:
+        validation = pg.validate_sql(sql)
+        if not validation["valid"]:
+            logging.warning(f"⚠️ SQL inválida detectada: {validation['error']}")
+            return {
+                "plan": plan,
+                "sql": sql,
+                "response": f"⚠️ Error de validación SQL: {validation['error']}",
+                "data_preview": []
+            }
+
+        # Ejecutar SQL solo si es válida
         try:
-            logging.info(f"🚀 Ejecutando SQL: {sql}")
+            logging.info(f"🚀 Ejecutando SQL validada: {sql}")
             data = pg.run_sql(sql)
         except Exception as e:
             logging.error(f"❌ Error al ejecutar SQL: {e}")
-            data = None
+            return {
+                "plan": plan,
+                "sql": sql,
+                "response": f"Error al ejecutar SQL: {e}",
+                "data_preview": []
+            }
 
     # --- Generar resumen comercial con IA
     summary_prompt = f"""
@@ -112,7 +129,7 @@ Usuario: {prompt}
 Acción planificada: {json.dumps(plan, indent=2, ensure_ascii=False)}
 Datos disponibles: {data.head(10).to_dict(orient='records') if data is not None and hasattr(data, 'head') else 'Sin datos o error.'}
 
-Resumí en lenguaje comercial claro, destacando hallazgos relevantes y contexto de negocio (solo si fue necesario, sino mantenete claro y conciso).
+Resumí en lenguaje comercial claro, destacando hallazgos relevantes y contexto de negocio.
 """
 
     try:
@@ -125,7 +142,6 @@ Resumí en lenguaje comercial claro, destacando hallazgos relevantes y contexto 
     except Exception as e:
         response_text = f"Error al generar resumen: {e}"
 
-    # --- Respuesta final
     return {
         "plan": plan,
         "sql": sql,
