@@ -1,40 +1,69 @@
-import logging, asyncio
-from fastapi import APIRouter, HTTPException  # type: ignore
-from pydantic import BaseModel  # type: ignore
+import logging
+from fastapi import FastAPI, Body
+from fastapi.responses import JSONResponse
 from analyzer_ai import analyze_query
 
-router = APIRouter()
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+# =====================================================
+# 🚀 Aplicación principal
+# =====================================================
+app = FastAPI(title="Quebracho Backend - MCP + IA")
 
-class ChatRequest(BaseModel):
-    prompt: str
+# Memoria simple por usuario (para mantener contexto de conversación)
+user_contexts = {}
 
-@router.post("/chat")
-async def chat(req: ChatRequest):
-    prompt = req.prompt.strip()
+# =====================================================
+# 💬 CHAT ENDPOINT
+# =====================================================
+@app.post("/chat")
+async def chat(req: dict = Body(...)):
+    """
+    Endpoint principal del chat comercial.
+    Usa IA + Postgres (MCP) para responder preguntas en lenguaje natural.
+    """
+    prompt = req.get("prompt", "").strip()
+    user_id = req.get("user_id", "anon")
+
     if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt vacío")
+        return JSONResponse(status_code=400, content={"error": "Prompt vacío"})
 
-    logging.info(f"💬 Pregunta: {prompt}")
+    logging.info(f"💬 ({user_id}) Pregunta: {prompt}")
+
+    # Crear o recuperar contexto del usuario
+    if user_id not in user_contexts:
+        user_contexts[user_id] = []
+
+    user_contexts[user_id].append({"role": "user", "content": prompt})
 
     try:
-        result = await asyncio.wait_for(analyze_query(prompt), timeout=90)
-        if result.get("sql") and "error" in result.get("sql", "").lower():
-            raise HTTPException(status_code=400, detail="Consulta SQL inválida")
+        # 🔍 Analizar y ejecutar consulta
+        result = await analyze_query(prompt, context=user_contexts[user_id])
+
+        # Guardar respuesta en el contexto
+        user_contexts[user_id].append({"role": "assistant", "content": result["response"]})
+
+        # Mantener solo las últimas 15 interacciones
+        if len(user_contexts[user_id]) > 15:
+            user_contexts[user_id] = user_contexts[user_id][-15:]
+
+        logging.info(f"✅ ({user_id}) SQL: {result.get('sql')}")
 
         return {
-            "plan": result.get("plan"),
+            "user_id": user_id,
             "sql": result.get("sql"),
             "response": result.get("response"),
-            "data_preview": result.get("data_preview", [])
+            "plan": result.get("plan"),
+            "context_len": len(user_contexts[user_id]),
         }
 
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Timeout: la consulta tardó demasiado.")
     except Exception as e:
-        logging.error(f"❌ Error en /chat: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"❌ Error en /chat ({user_id}): {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-@router.get("/ping")
+
+# =====================================================
+# 🧭 HEALTHCHECK
+# =====================================================
+@app.get("/ping")
 def ping():
-    return {"status": "ok", "message": "AI + MCP API operativa"}
+    """Verifica que el backend esté activo."""
+    return {"status": "ok", "msg": "Backend MCP + IA activo"}

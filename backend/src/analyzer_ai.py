@@ -1,150 +1,99 @@
 import json, os, logging
-from openai import OpenAI  # type: ignore
+from openai import OpenAI # type: ignore
 from dotenv import load_dotenv
-from mcp_postgres import get_table_schema, PostgresMCP
+import pandas as pd
+from mcp_postgres import PostgresMCP, get_table_schema
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
 pg = PostgresMCP()
 
-# ============================================
-# 🧠 ANALIZADOR PRINCIPAL
-# ============================================
-async def analyze_query(prompt: str):
+async def analyze_query(prompt: str, context: list = None):
     """
-    Interpreta la pregunta natural, genera un plan (JSON) y ejecuta SQL real si corresponde.
+    Analiza la pregunta del usuario y genera un plan (JSON con SQL o resumen),
+    utilizando contexto conversacional del usuario.
     """
-
-    # --- Obtener esquema real desde Postgres
     schema = get_table_schema(pg.table)
-    schema_text = json.dumps(schema, ensure_ascii=False)
+    schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
 
-    # --- Construcción del prompt mejorado
     plan_prompt = f"""
-Sos un asistente comercial con acceso a una base PostgreSQL llamada "{pg.table}".
-El esquema de la tabla es:
+Tenés acceso a una tabla de PostgreSQL llamada "{pg.table}" con el siguiente esquema:
 {schema_text}
 
-Tu tarea es analizar la siguiente pregunta y devolver SOLO un JSON válido con este formato:
+Analizá la siguiente pregunta y devolveme SOLO un JSON válido con este formato:
 {{
   "action": "query_postgres" | "summary",
-  "query": "<consulta SQL en formato MCP si aplica>",
+  "query": "<consulta SQL si aplica>",
   "need_data": true | false
 }}
 
 Reglas:
 - Si la pregunta requiere datos o cálculos, usá "query_postgres" y "need_data": true.
 - Si es conceptual o general, usá "summary" y "need_data": false.
-- La consulta SQL debe ser simple, válida y compatible con Postgres (respetá mayúsculas y comillas).
-- Si no se menciona un año, asumí el actual.
-- Siempre devolvé un JSON perfectamente formateado y válido.
+- La consulta SQL debe ser válida para Postgres (minúsculas, sin comillas).
+- Si no se menciona el año, asumí el actual.
+- Siempre devolvé un JSON válido y limpio.
 
 Pregunta del usuario:
 {prompt}
 """
 
-    logging.info(f"🧩 Prompt enviado al modelo:\n{plan_prompt}")
+    # 💬 Construcción del historial de conversación
+    messages = [{"role": "system", "content": "Sos un analista comercial con memoria de contexto por usuario."}]
+    if context:
+        messages.extend(context)
+    messages.append({"role": "user", "content": plan_prompt})
 
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": plan_prompt}],
-            temperature=0
-        )
-        content = resp.choices[0].message.content.strip()
-        logging.info(f"🧠 Respuesta cruda del modelo: {content}")
-    except Exception as e:
-        logging.error(f"❌ Error al invocar OpenAI: {e}")
-        return {"error": str(e), "sql": None, "response": "Error en análisis del plan."}
+    # 🧠 Primera llamada: generar plan de acción
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=0
+    )
 
-    # --- Parsear JSON devuelto
+    content = resp.choices[0].message.content.strip()
+
     try:
         plan = json.loads(content)
-    except Exception:
-        logging.warning("⚠️ No se pudo parsear JSON, creando plan por defecto.")
-        plan = {"action": "query_postgres", "need_data": True, "query": None}
+    except Exception as e:
+        logging.warning(f"⚠️ Error parseando plan JSON: {e}")
+        plan = {"action": "summary", "need_data": False}
 
-    sql = plan.get("query")
-
-    # --- 🔧 Si no hay SQL o need_data=False, forzar generación de SQL
-    if not sql or not plan.get("need_data", True):
-        logging.info("⚙️ Forzando generación de SQL por falta de plan válido...")
-        cols = ", ".join([c["column"] for c in schema])
-        sql_prompt = f"""
-Convertí la siguiente pregunta en una mini consulta SQL para PostgreSQL (tabla "{pg.table}") usando las columnas [{cols}].
-Ejemplo de formato: SELECT SUM(Amount) WHERE Year=2025 AND Month=9;
-Pregunta: {prompt}
-"""
-        try:
-            sql_resp = client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": "Traductor de lenguaje natural a SQL simplificada"},
-                    {"role": "user", "content": sql_prompt}
-                ],
-                temperature=0
-            )
-            sql = sql_resp.choices[0].message.content.strip().splitlines()[0]
-            plan["query"] = sql
-            plan["action"] = "query_postgres"
-            plan["need_data"] = True
-        except Exception as e:
-            logging.error(f"❌ Error al intentar generar SQL forzada: {e}")
-            sql = None
-
-    # --- Validación SQL antes de ejecutar
+    # 🔎 Ejecutar SQL si aplica
     data = None
-    if sql:
-        validation = pg.validate_sql(sql)
-        if not validation["valid"]:
-            logging.warning(f"⚠️ SQL inválida detectada: {validation['error']}")
-            return {
-                "plan": plan,
-                "sql": sql,
-                "response": f"⚠️ Error de validación SQL: {validation['error']}",
-                "data_preview": []
-            }
-
-        # Ejecutar SQL solo si es válida
-        try:
+    if plan.get("need_data") and plan.get("action") == "query_postgres":
+        sql = plan.get("query")
+        if sql:
             logging.info(f"🚀 Ejecutando SQL validada: {sql}")
             data = pg.run_sql(sql)
-        except Exception as e:
-            logging.error(f"❌ Error al ejecutar SQL: {e}")
-            return {
-                "plan": plan,
-                "sql": sql,
-                "response": f"Error al ejecutar SQL: {e}",
-                "data_preview": []
-            }
 
-    # --- Generar resumen comercial con IA
+    # 🧩 Generar resumen final en lenguaje comercial
     summary_prompt = f"""
 Usuario: {prompt}
 Acción planificada: {json.dumps(plan, indent=2, ensure_ascii=False)}
-Datos disponibles: {data.head(10).to_dict(orient='records') if data is not None and hasattr(data, 'head') else 'Sin datos o error.'}
+Datos disponibles: {data.head(10).to_dict(orient='records') if isinstance(data, pd.DataFrame) else 'Sin datos'}
 
-Resumí en lenguaje comercial claro, destacando hallazgos relevantes y contexto de negocio.
+Resumí la información en lenguaje claro, breve y con énfasis comercial.
 """
 
-    try:
-        summary = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": summary_prompt}],
-            temperature=0.2
-        )
-        response_text = summary.choices[0].message.content.strip()
-    except Exception as e:
-        response_text = f"Error al generar resumen: {e}"
+    messages.append({"role": "assistant", "content": content})
+    messages.append({"role": "user", "content": summary_prompt})
+
+    summary = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=0.2
+    )
+
+    response_text = summary.choices[0].message.content
 
     return {
         "plan": plan,
-        "sql": sql,
+        "sql": plan.get("query"),
         "response": response_text,
-        "data_preview": data.head(10).to_dict(orient="records") if data is not None and hasattr(data, "head") else []
+        "data_preview": data.head(10).to_dict(orient="records") if isinstance(data, pd.DataFrame) else []
     }
