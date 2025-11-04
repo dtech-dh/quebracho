@@ -1,11 +1,24 @@
+import os
 import logging
+import psycopg2
 from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
 from analyzer_ai import analyze_query
+from dotenv import load_dotenv
 
 # =====================================================
-# 🚀 Aplicación principal
+# ⚙️ Configuración base
 # =====================================================
+load_dotenv()
+
+POSTGRES_CONFIG = {
+    "host": os.getenv("POSTGRES_HOST", "db"),
+    "port": os.getenv("POSTGRES_PORT", "5432"),
+    "database": os.getenv("POSTGRES_DB"),
+    "user": os.getenv("POSTGRES_USER"),
+    "password": os.getenv("POSTGRES_PASSWORD"),
+}
+
 app = FastAPI(title="Quebracho Backend - MCP + IA")
 
 # Memoria simple por usuario (para mantener contexto de conversación)
@@ -67,3 +80,34 @@ async def chat(req: dict = Body(...)):
 def ping():
     """Verifica que el backend esté activo."""
     return {"status": "ok", "msg": "Backend MCP + IA activo"}
+
+
+# =====================================================
+# 📅 FECHA DE ÚLTIMA ACTUALIZACIÓN
+# =====================================================
+@app.get("/last")
+def ultima_actualizacion():
+    """
+    Devuelve la fecha máxima registrada en la tabla 'ventas'.
+    Ideal para mostrar al usuario el rango temporal disponible.
+    """
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONFIG)
+        cur = conn.cursor()
+        cur.execute('SELECT MAX("fecha") FROM ventas;')
+        result = cur.fetchone()
+        conn.close()
+
+        ultima_fecha = result[0].strftime("%Y-%m-%d") if result and result[0] else None
+
+        logging.info(f"📅 Última fecha de datos: {ultima_fecha}")
+
+        return {
+            "status": "ok",
+            "ultima_actualizacion": ultima_fecha,
+            "descripcion": "Fecha más reciente encontrada en la tabla de ventas",
+        }
+
+    except Exception as e:
+        logging.error(f"❌ Error al obtener última actualización: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
