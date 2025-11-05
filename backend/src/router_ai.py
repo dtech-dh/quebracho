@@ -1,10 +1,16 @@
 import os
 import logging
 import psycopg2
-from fastapi import FastAPI, Body
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Body #type: ignore
+from fastapi.responses import JSONResponse #type: ignore
 from analyzer_ai import analyze_query
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, generate_latest #type: ignore
+from fastapi import Response #type: ignore
+
+REQS = Counter("quebracho_requests_total", "Total de requests", ["route"])
+LAT = Histogram("quebracho_latency_seconds", "Latencia por endpoint", ["route"])
+
 
 # =====================================================
 # ⚙️ Configuración base
@@ -23,6 +29,17 @@ app = FastAPI(title="Quebracho Backend - MCP + IA")
 
 # Memoria simple por usuario (para mantener contexto de conversación)
 user_contexts = {}
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    route = request.url.path
+    REQS.labels(route=route).inc()
+    import time
+    start = time.time()
+    response = await call_next(request)
+    LAT.labels(route=route).observe(time.time() - start)
+    return response
+
 
 # =====================================================
 # 💬 CHAT ENDPOINT
@@ -94,7 +111,7 @@ def ultima_actualizacion():
     try:
         conn = psycopg2.connect(**POSTGRES_CONFIG)
         cur = conn.cursor()
-        cur.execute('SELECT MAX("fecha") FROM ventas;')
+        cur.execute('SELECT MAX(fecha) FROM ventas;')
         result = cur.fetchone()
         conn.close()
 
@@ -111,3 +128,9 @@ def ultima_actualizacion():
     except Exception as e:
         logging.error(f"❌ Error al obtener última actualización: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/metrics")
+def metrics():
+    """Endpoint compatible con Prometheus."""
+    return Response(generate_latest(), media_type="text/plain")

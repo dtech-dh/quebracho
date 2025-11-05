@@ -21,7 +21,7 @@ USERS = {
 def obtener_ultima_actualizacion():
     """Consulta al backend la última fecha disponible en la base."""
     try:
-        resp = requests.get(f"{API_URL}/last", timeout=10)
+        resp = requests.get(f"{API_URL}/last", timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             return data.get("ultima_actualizacion")

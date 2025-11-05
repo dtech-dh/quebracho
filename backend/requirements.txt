@@ -1,8 +1,8 @@
 fastapi
 uvicorn
-openai
+pandas
 sqlalchemy
 psycopg2-binary
-pandas
 python-dotenv
-pytest
+openai
+prometheus-client

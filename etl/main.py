@@ -84,6 +84,67 @@ def ensure_pg_table(conn, df: pd.DataFrame):
 
 
 # ===========================================================
+# CREACIÓN DE ÍNDICES Y VISTAS OPTIMIZADAS
+# ===========================================================
+def ensure_indexes_and_views():
+    """Crea índices y vista materializada si no existen."""
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONFIG)
+        cur = conn.cursor()
+
+        logging.info("🧱 Verificando índices y vista materializada...")
+
+        # Índices clave
+        index_sql = [
+            f'CREATE INDEX IF NOT EXISTS idx_{TARGET_TABLE}_fecha        ON "{TARGET_TABLE}" (fecha);',
+            f'CREATE INDEX IF NOT EXISTS idx_{TARGET_TABLE}_mes          ON "{TARGET_TABLE}" (mes);',
+            f'CREATE INDEX IF NOT EXISTS idx_{TARGET_TABLE}_cliente      ON "{TARGET_TABLE}" (cliente);',
+            f'CREATE INDEX IF NOT EXISTS idx_{TARGET_TABLE}_vendedor     ON "{TARGET_TABLE}" (vendedor);',
+            f'CREATE INDEX IF NOT EXISTS idx_{TARGET_TABLE}_mes_cliente  ON "{TARGET_TABLE}" (mes, cliente);',
+            f'CREATE INDEX IF NOT EXISTS idx_{TARGET_TABLE}_mes_vendedor ON "{TARGET_TABLE}" (mes, vendedor);'
+        ]
+        for sql in index_sql:
+            cur.execute(sql)
+
+        # Vista materializada
+        cur.execute("""
+            CREATE MATERIALIZED VIEW IF NOT EXISTS mv_ventas_mensuales AS
+            SELECT
+                mes,
+                cliente,
+                vendedor,
+                SUM(COALESCE(monto::numeric,0)) AS total_ventas,
+                SUM(COALESCE(cantidad::numeric,0)) AS total_unidades
+            FROM ventas
+            GROUP BY mes, cliente, vendedor;
+        """)
+
+        # Índices para la vista
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_mv_mes ON mv_ventas_mensuales(mes);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_mv_cliente ON mv_ventas_mensuales(cliente);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_mv_vendedor ON mv_ventas_mensuales(vendedor);')
+
+        conn.commit()
+        conn.close()
+        logging.info("✅ Índices y vista materializada verificados correctamente.")
+    except Exception as e:
+        logging.error(f"Error al crear índices/vistas: {e}")
+
+
+def refresh_materialized_view():
+    """Actualiza la vista materializada si existe."""
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONFIG)
+        cur = conn.cursor()
+        cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_ventas_mensuales;")
+        conn.commit()
+        conn.close()
+        logging.info("♻️ Vista materializada mv_ventas_mensuales actualizada correctamente.")
+    except Exception as e:
+        logging.warning(f"No se pudo refrescar la vista materializada: {e}")
+
+
+# ===========================================================
 # EXTRACCIÓN
 # ===========================================================
 def fetch_data():
@@ -107,15 +168,12 @@ def fetch_data():
         logging.info("Sin nuevas filas.")
         return None
 
-    # 🔁 Renombrar columnas según el mapa
     df.rename(columns=COLUMN_MAP, inplace=True)
     df.columns = [c.lower() for c in df.columns]
 
-    # 📅 Agregar mes (YYYY-MM)
     if "fecha" in df.columns:
-        df["mes"] = pd.to_datetime(df["fecha"], errors='coerce').dt.strftime("%Y-%m")
+        df["mes"] = pd.to_datetime(df["fecha"], errors="coerce").dt.strftime("%Y-%m")
 
-    # 🧮 Hash deduplicador
     df["row_hash"] = df.apply(hash_row, axis=1)
 
     logging.info(f"{len(df)} filas leídas y normalizadas.")
@@ -123,27 +181,16 @@ def fetch_data():
 
 
 # ===========================================================
-# CARGA EN POSTGRES (robusta y con saneo de datos)
+# CARGA EN POSTGRES
 # ===========================================================
 def load_to_pg(df: pd.DataFrame):
-    """Carga incremental deduplicada en Postgres, con validación detallada."""
     if df is None or df.empty:
         logging.warning("⚠️ DataFrame vacío, no se insertará nada.")
         return
 
-    # 🔹 Limpieza básica
     df = df.fillna("").replace("NaT", "")
     df = df.astype(str)
     cols = df.columns.tolist()
-
-    # 🔹 Saneado de columnas numéricas
-    for col in ["cantidad", "precio_unitario", "monto", "saldo"]:
-        if col in df.columns:
-            df[col] = (
-                df[col]
-                .replace(r"[^0-9\.\-]", "", regex=True)  # solo números y puntos
-                .replace("", "0")
-            )
 
     conn = psycopg2.connect(**POSTGRES_CONFIG)
     ensure_pg_table(conn, df)
@@ -155,10 +202,7 @@ def load_to_pg(df: pd.DataFrame):
     ON CONFLICT ("row_hash") DO NOTHING;
     '''
 
-    inserted = 0
-    failed = 0
-    error_samples = []
-
+    inserted, failed = 0, 0
     with conn:
         with conn.cursor() as cur:
             for i, (_, row) in enumerate(df.iterrows(), start=1):
@@ -171,24 +215,15 @@ def load_to_pg(df: pd.DataFrame):
                 except Exception as e:
                     failed += 1
                     conn.rollback()
-                    if len(error_samples) < 5:
-                        error_samples.append(str(e))
+                    if failed <= 3:
+                        logging.warning(f"⚠️ Error en fila {i}: {e}")
                     continue
-
     conn.close()
-
-    logging.info("=== RESULTADO DE CARGA ===")
-    logging.info(f"✅ Filas insertadas correctamente: {inserted}")
-    if failed > 0:
-        logging.warning(f"⚠️ Filas con error: {failed}")
-        for err in error_samples:
-            logging.warning(f"  → {err}")
-    else:
-        logging.info("🎯 Todas las filas insertadas correctamente.")
+    logging.info(f"✅ {inserted} filas insertadas. ❌ {failed} errores.")
 
 
 # ===========================================================
-# VALIDACIÓN CRUZADA SQLSERVER ↔ POSTGRES
+# VALIDACIÓN CRUZADA
 # ===========================================================
 def cross_validate():
     try:
@@ -205,61 +240,15 @@ def cross_validate():
             src_count = cursor.fetchone()[0]
 
         conn_pg = psycopg2.connect(**POSTGRES_CONFIG)
-        cursor_pg = conn_pg.cursor()
-        cursor_pg.execute(f'SELECT COUNT(*) FROM "{TARGET_TABLE}"')
-        dest_count = cursor_pg.fetchone()[0]
+        cur_pg = conn_pg.cursor()
+        cur_pg.execute(f'SELECT COUNT(*) FROM "{TARGET_TABLE}"')
+        dest_count = cur_pg.fetchone()[0]
         conn_pg.close()
 
         diff = abs(src_count - dest_count)
-        logging.info(f"✅ Validación cruzada: SQLServer={src_count} vs Postgres={dest_count} (Δ={diff})")
-        if diff > 0:
-            logging.warning(f"⚠️ Diferencia detectada de {diff} registros entre origen y destino.")
-        else:
-            logging.info("🎯 Las cantidades coinciden perfectamente.")
+        logging.info(f"🔎 Validación: SQLServer={src_count} | Postgres={dest_count} | Δ={diff}")
     except Exception as e:
-        logging.error(f"Error durante validación cruzada: {e}")
-
-
-# ===========================================================
-# DIAGNÓSTICO INICIAL
-# ===========================================================
-def initial_diagnostics():
-    logging.info("===== Diagnóstico inicial =====")
-    logging.info(f"📘 Mapeo activo SQLServer → Postgres:\n{json.dumps(COLUMN_MAP, indent=2, ensure_ascii=False)}")
-
-    try:
-        conn_str = (
-            f'DRIVER={{ODBC Driver 17 for SQL Server}};'
-            f'SERVER={SQL_CONFIG["host"]},{SQL_CONFIG["port"]};'
-            f'DATABASE={SQL_CONFIG["database"]};'
-            f'UID={SQL_CONFIG["user"]};'
-            f'PWD={SQL_CONFIG["password"]}'
-        )
-        with pyodbc.connect(conn_str, timeout=30) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT TOP 1 * FROM [Sheet1$]")
-            columns = [c[0] for c in cursor.description]
-            cursor.execute("SELECT COUNT(*) FROM [Sheet1$]")
-            count = cursor.fetchone()[0]
-            logging.info(f"Origen columnas: {columns}")
-            logging.info(f"Origen cantidad: {count}")
-    except Exception as e:
-        logging.error(f"Error al conectar con SQL Server: {e}")
-
-    try:
-        conn_pg = psycopg2.connect(**POSTGRES_CONFIG)
-        cursor_pg = conn_pg.cursor()
-        cursor_pg.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{TARGET_TABLE}'")
-        columns = [r[0] for r in cursor_pg.fetchall()]
-        cursor_pg.execute(f"SELECT COUNT(*) FROM \"{TARGET_TABLE}\"")
-        count = cursor_pg.fetchone()[0]
-        logging.info(f"Destino columnas: {columns}")
-        logging.info(f"Destino cantidad: {count}")
-        conn_pg.close()
-    except Exception as e:
-        logging.error(f"Error al conectar con PostgreSQL: {e}")
-
-    logging.info("===== Fin diagnóstico =====")
+        logging.error(f"Error en validación cruzada: {e}")
 
 
 # ===========================================================
@@ -267,12 +256,14 @@ def initial_diagnostics():
 # ===========================================================
 def job():
     try:
+        ensure_indexes_and_views()
         df = fetch_data()
-        if df is not None and not df.empty:
+        if df is not None:
             load_to_pg(df)
+            refresh_materialized_view()
+            cross_validate()
         else:
             logging.info("No hay datos nuevos para insertar.")
-        cross_validate()
     except Exception:
         logging.exception("Error durante el ETL.")
 
@@ -281,10 +272,9 @@ def job():
 # MAIN
 # ===========================================================
 if __name__ == "__main__":
-    initial_diagnostics()
+    logging.info("🚀 Iniciando ETL automatizado con índices + vistas + validación...")
     scheduler = BlockingScheduler()
     scheduler.add_job(job, 'interval', hours=4, next_run_time=datetime.datetime.now())
-    logging.info("Worker ETL con deduplicación + validación cruzada iniciado.")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

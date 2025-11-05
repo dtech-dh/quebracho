@@ -1,0 +1,6 @@
+CREATE OR REPLACE FUNCTION refresh_mv_ventas()
+RETURNS void AS $$
+BEGIN
+  REFRESH MATERIALIZED VIEW CONCURRENTLY mv_ventas_mensuales;
+END;
+$$ LANGUAGE plpgsql;
