@@ -1,5 +1,5 @@
 import json, os, logging
-from openai import OpenAI # type: ignore
+from openai import OpenAI  # type: ignore
 from dotenv import load_dotenv
 import pandas as pd
 from mcp_postgres import PostgresMCP, get_table_schema
@@ -20,6 +20,22 @@ async def analyze_query(prompt: str, context: list = None):
     schema = get_table_schema(pg.table)
     schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
 
+    # =====================================================
+    # 🧩 Normalización del contexto (evita error 400)
+    # =====================================================
+    normalized_context = []
+    if context:
+        for c in context:
+            if not isinstance(c, dict):
+                continue
+            if "prompt" in c:
+                normalized_context.append({"role": "user", "content": c["prompt"]})
+            if "response" in c and c["response"]:
+                normalized_context.append({"role": "assistant", "content": c["response"]})
+
+    # =====================================================
+    # 🎯 Construcción del prompt para planificación
+    # =====================================================
     plan_prompt = f"""
 Tenés acceso a una tabla de PostgreSQL llamada "{pg.table}" con el siguiente esquema:
 {schema_text}
@@ -42,13 +58,13 @@ Pregunta del usuario:
 {prompt}
 """
 
-    # 💬 Construcción del historial de conversación
     messages = [{"role": "system", "content": "Sos un analista comercial con memoria de contexto por usuario."}]
-    if context:
-        messages.extend(context)
+    messages.extend(normalized_context)
     messages.append({"role": "user", "content": plan_prompt})
 
+    # =====================================================
     # 🧠 Primera llamada: generar plan de acción
+    # =====================================================
     resp = client.chat.completions.create(
         model=MODEL,
         messages=messages,
@@ -63,7 +79,9 @@ Pregunta del usuario:
         logging.warning(f"⚠️ Error parseando plan JSON: {e}")
         plan = {"action": "summary", "need_data": False}
 
-    # 🔎 Ejecutar SQL si aplica
+    # =====================================================
+    # 🚀 Ejecutar SQL si aplica
+    # =====================================================
     data = None
     if plan.get("need_data") and plan.get("action") == "query_postgres":
         sql = plan.get("query")
@@ -71,7 +89,9 @@ Pregunta del usuario:
             logging.info(f"🚀 Ejecutando SQL validada: {sql}")
             data = pg.run_sql(sql)
 
+    # =====================================================
     # 🧩 Generar resumen final en lenguaje comercial
+    # =====================================================
     summary_prompt = f"""
 Usuario: {prompt}
 Acción planificada: {json.dumps(plan, indent=2, ensure_ascii=False)}
@@ -91,9 +111,16 @@ Resumí la información en lenguaje claro, breve y con énfasis comercial.
 
     response_text = summary.choices[0].message.content
 
+    # =====================================================
+    # 🧾 Resultado final estructurado
+    # =====================================================
     return {
         "plan": plan,
         "sql": plan.get("query"),
         "response": response_text,
-        "data_preview": data.head(10).to_dict(orient="records") if isinstance(data, pd.DataFrame) else []
+        "data_preview": (
+            data.head(10).to_dict(orient="records")
+            if isinstance(data, pd.DataFrame)
+            else []
+        ),
     }

@@ -1,16 +1,13 @@
 import os
+import time
 import logging
 import psycopg2
-from fastapi import FastAPI, Body #type: ignore
-from fastapi.responses import JSONResponse #type: ignore
+from fastapi import FastAPI, Body, Response  # type: ignore
+from fastapi.responses import JSONResponse  # type: ignore
 from analyzer_ai import analyze_query
 from dotenv import load_dotenv
-from prometheus_client import Counter, Histogram, generate_latest #type: ignore
-from fastapi import Response #type: ignore
-
-REQS = Counter("quebracho_requests_total", "Total de requests", ["route"])
-LAT = Histogram("quebracho_latency_seconds", "Latencia por endpoint", ["route"])
-
+from prometheus_client import Counter, Histogram, generate_latest  # type: ignore
+from memory_manager import MemoryManager  # 🧠 Nuevo módulo de memoria persistente
 
 # =====================================================
 # ⚙️ Configuración base
@@ -26,15 +23,16 @@ POSTGRES_CONFIG = {
 }
 
 app = FastAPI(title="Quebracho Backend - MCP + IA")
+memory = MemoryManager()
 
-# Memoria simple por usuario (para mantener contexto de conversación)
-user_contexts = {}
+# Prometheus metrics
+REQS = Counter("quebracho_requests_total", "Total de requests", ["route"])
+LAT = Histogram("quebracho_latency_seconds", "Latencia por endpoint", ["route"])
 
 @app.middleware("http")
 async def metrics_middleware(request, call_next):
     route = request.url.path
     REQS.labels(route=route).inc()
-    import time
     start = time.time()
     response = await call_next(request)
     LAT.labels(route=route).observe(time.time() - start)
@@ -42,13 +40,13 @@ async def metrics_middleware(request, call_next):
 
 
 # =====================================================
-# 💬 CHAT ENDPOINT
+# 💬 CHAT ENDPOINT (con memoria persistente)
 # =====================================================
 @app.post("/chat")
 async def chat(req: dict = Body(...)):
     """
     Endpoint principal del chat comercial.
-    Usa IA + Postgres (MCP) para responder preguntas en lenguaje natural.
+    Usa IA + Postgres (MCP) con memoria conversacional en base de datos.
     """
     prompt = req.get("prompt", "").strip()
     user_id = req.get("user_id", "anon")
@@ -58,35 +56,60 @@ async def chat(req: dict = Body(...)):
 
     logging.info(f"💬 ({user_id}) Pregunta: {prompt}")
 
-    # Crear o recuperar contexto del usuario
-    if user_id not in user_contexts:
-        user_contexts[user_id] = []
-
-    user_contexts[user_id].append({"role": "user", "content": prompt})
-
     try:
-        # 🔍 Analizar y ejecutar consulta
-        result = await analyze_query(prompt, context=user_contexts[user_id])
+        # 🔹 Recuperar contexto previo (últimas 5 interacciones)
+        context = memory.get_recent_context(user_id)
 
-        # Guardar respuesta en el contexto
-        user_contexts[user_id].append({"role": "assistant", "content": result["response"]})
+        # 🔹 Analizar y ejecutar consulta con contexto
+        result = await analyze_query(prompt, context=context)
 
-        # Mantener solo las últimas 15 interacciones
-        if len(user_contexts[user_id]) > 15:
-            user_contexts[user_id] = user_contexts[user_id][-15:]
+        # 🔹 Guardar interacción completa en memoria persistente
+        memory.save_interaction(
+            user_id,
+            prompt,
+            result.get("response", ""),
+            result.get("sql", ""),
+            resumen=result.get("plan", ""),
+        )
 
-        logging.info(f"✅ ({user_id}) SQL: {result.get('sql')}")
+        logging.info(f"✅ ({user_id}) SQL ejecutada: {result.get('sql')}")
 
         return {
             "user_id": user_id,
             "sql": result.get("sql"),
             "response": result.get("response"),
             "plan": result.get("plan"),
-            "context_len": len(user_contexts[user_id]),
+            "context_len": len(context) + 1,
         }
 
     except Exception as e:
         logging.error(f"❌ Error en /chat ({user_id}): {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# =====================================================
+# 🧠 CONTEXTO (Memoria)
+# =====================================================
+@app.get("/context/{user_id}")
+def get_context(user_id: str):
+    """Devuelve las últimas interacciones guardadas de un usuario."""
+    try:
+        data = memory.get_recent_context(user_id, limit=10)
+        return {"user_id": user_id, "context": data}
+    except Exception as e:
+        logging.error(f"❌ Error al obtener contexto ({user_id}): {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/context/{user_id}")
+def clear_context(user_id: str):
+    """Limpia el historial conversacional de un usuario."""
+    try:
+        memory.clear_context(user_id)
+        logging.info(f"🧹 Contexto de {user_id} eliminado correctamente.")
+        return {"status": "ok", "msg": f"Contexto de {user_id} eliminado"}
+    except Exception as e:
+        logging.error(f"❌ Error al limpiar contexto ({user_id}): {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
@@ -116,7 +139,6 @@ def ultima_actualizacion():
         conn.close()
 
         ultima_fecha = result[0].strftime("%Y-%m-%d") if result and result[0] else None
-
         logging.info(f"📅 Última fecha de datos: {ultima_fecha}")
 
         return {
@@ -130,6 +152,9 @@ def ultima_actualizacion():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# =====================================================
+# 📊 MÉTRICAS (Prometheus)
+# =====================================================
 @app.get("/metrics")
 def metrics():
     """Endpoint compatible con Prometheus."""
