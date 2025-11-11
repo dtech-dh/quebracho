@@ -3,6 +3,7 @@ from openai import OpenAI  # type: ignore
 from dotenv import load_dotenv
 import pandas as pd
 from mcp_postgres import PostgresMCP, get_table_schema
+from context_loader import load_business_context, get_context_text  # 🧠 Contexto empresarial
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -12,20 +13,31 @@ MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 pg = PostgresMCP()
 
+# =====================================================
+# 🧠 CONTEXTO EMPRESARIAL GLOBAL
+# =====================================================
+BUSINESS_CONTEXT = load_business_context()
+if BUSINESS_CONTEXT:
+    logging.info("📚 Contexto empresarial cargado correctamente en analyzer_ai.")
+else:
+    logging.warning("⚠️ No se pudo cargar contexto empresarial.")
+
+
+# =====================================================
+# 🔍 FUNCIÓN PRINCIPAL
+# =====================================================
 async def analyze_query(prompt: str, context: list = None):
-    """
-    Analiza la pregunta del usuario y genera un plan (JSON con SQL o resumen),
-    utilizando contexto conversacional del usuario.
-    """
+    """Analiza la pregunta del usuario combinando memoria conversacional + contexto empresarial."""
     schema = get_table_schema(pg.table)
     schema_text = json.dumps(schema, ensure_ascii=False, indent=2)
+    business_context_text = get_context_text()
 
     # =====================================================
-    # 🧩 Normalización del contexto (evita error 400)
+    # 🧩 Normalización del contexto (previene error 400)
     # =====================================================
     normalized_context = []
     if context:
-        for c in context:
+        for c in context[-10:]:  # solo las últimas 10 para mantener coherencia
             if not isinstance(c, dict):
                 continue
             if "prompt" in c:
@@ -34,11 +46,14 @@ async def analyze_query(prompt: str, context: list = None):
                 normalized_context.append({"role": "assistant", "content": c["response"]})
 
     # =====================================================
-    # 🎯 Construcción del prompt para planificación
+    # 🎯 Construcción del prompt inicial
     # =====================================================
     plan_prompt = f"""
-Tenés acceso a una tabla de PostgreSQL llamada "{pg.table}" con el siguiente esquema:
+Tenés acceso a una base de datos PostgreSQL con la tabla "{pg.table}" y este esquema:
 {schema_text}
+
+También conocés el siguiente contexto empresarial actualizado:
+{business_context_text}
 
 Analizá la siguiente pregunta y devolveme SOLO un JSON válido con este formato:
 {{
@@ -46,24 +61,31 @@ Analizá la siguiente pregunta y devolveme SOLO un JSON válido con este formato
   "query": "<consulta SQL si aplica>",
   "need_data": true | false
 }}
-
 Reglas:
-- Si la pregunta requiere datos o cálculos, usá "query_postgres" y "need_data": true.
-- Si es conceptual o general, usá "summary" y "need_data": false.
-- La consulta SQL debe ser válida para Postgres (minúsculas, sin comillas).
-- Si no se menciona el año, asumí el actual.
-- Siempre devolvé un JSON válido y limpio.
+- Si la pregunta requiere datos, usá "query_postgres".
+- Si es conceptual, usá "summary".
+- La SQL debe ser válida para Postgres (minúsculas, sin comillas).
+- Si no se menciona año, asumí el actual.
+- Devuelve siempre un JSON válido y limpio.
 
 Pregunta del usuario:
 {prompt}
 """
 
-    messages = [{"role": "system", "content": "Sos un analista comercial con memoria de contexto por usuario."}]
+    # =====================================================
+    # 🧠 Construcción del contexto completo (memoria extendida)
+    # =====================================================
+    messages = [
+        {"role": "system", "content": (
+            "Sos un analista comercial con memoria extendida y conocimiento del negocio. "
+            "Recordá las últimas conversaciones del usuario y respondé de forma coherente, profesional y orientada a ventas."
+        )}
+    ]
     messages.extend(normalized_context)
     messages.append({"role": "user", "content": plan_prompt})
 
     # =====================================================
-    # 🧠 Primera llamada: generar plan de acción
+    # 🧠 Primera llamada: generación del plan (JSON)
     # =====================================================
     resp = client.chat.completions.create(
         model=MODEL,
@@ -72,7 +94,6 @@ Pregunta del usuario:
     )
 
     content = resp.choices[0].message.content.strip()
-
     try:
         plan = json.loads(content)
     except Exception as e:
@@ -80,7 +101,7 @@ Pregunta del usuario:
         plan = {"action": "summary", "need_data": False}
 
     # =====================================================
-    # 🚀 Ejecutar SQL si aplica
+    # 🚀 Ejecución de SQL si aplica
     # =====================================================
     data = None
     if plan.get("need_data") and plan.get("action") == "query_postgres":
@@ -90,14 +111,15 @@ Pregunta del usuario:
             data = pg.run_sql(sql)
 
     # =====================================================
-    # 🧩 Generar resumen final en lenguaje comercial
+    # 💬 Segunda llamada: resumen con contexto empresarial
     # =====================================================
     summary_prompt = f"""
 Usuario: {prompt}
 Acción planificada: {json.dumps(plan, indent=2, ensure_ascii=False)}
 Datos disponibles: {data.head(10).to_dict(orient='records') if isinstance(data, pd.DataFrame) else 'Sin datos'}
-
-Resumí la información en lenguaje claro, breve y con énfasis comercial.
+Recordá el contexto empresarial actual:
+{business_context_text}
+Resumí la información en lenguaje claro, conciso y con enfoque comercial.
 """
 
     messages.append({"role": "assistant", "content": content})
@@ -112,7 +134,7 @@ Resumí la información en lenguaje claro, breve y con énfasis comercial.
     response_text = summary.choices[0].message.content
 
     # =====================================================
-    # 🧾 Resultado final estructurado
+    # 🧾 Resultado final
     # =====================================================
     return {
         "plan": plan,

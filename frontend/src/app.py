@@ -19,39 +19,32 @@ USERS = {
 # =========================================================
 @st.cache_data(ttl=600)
 def obtener_ultima_actualizacion():
-    """Consulta al backend la última fecha disponible en la base."""
     try:
-        resp = requests.get(f"{API_URL}/last", timeout=30)
-        if resp.status_code == 200:
-            return resp.json().get("ultima_actualizacion")
-        return None
-    except Exception as e:
-        st.warning(f"No se pudo obtener la fecha de actualización: {e}")
-        return None
+        r = requests.get(f"{API_URL}/last", timeout=20)
+        if r.status_code == 200:
+            return r.json().get("ultima_actualizacion")
+    except Exception:
+        pass
+    return None
 
 
-def obtener_historial(user_id: str):
-    """Obtiene el historial de chat del usuario desde el backend."""
+def obtener_historial(user_id: str, limit: int = 50):
     try:
-        resp = requests.get(f"{API_URL}/context/{user_id}", timeout=30)
-        if resp.status_code == 200:
-            return resp.json().get("context", [])
-        return []
+        r = requests.get(f"{API_URL}/history/{user_id}?limit={limit}", timeout=20)
+        if r.status_code == 200:
+            return r.json().get("history", [])
     except Exception as e:
-        st.warning(f"No se pudo obtener el historial: {e}")
-        return []
+        st.warning(f"No se pudo obtener historial: {e}")
+    return []
 
 
 def limpiar_historial(user_id: str):
-    """Borra el contexto del usuario."""
     try:
-        resp = requests.delete(f"{API_URL}/context/{user_id}", timeout=30)
-        if resp.status_code == 200:
+        r = requests.delete(f"{API_URL}/context/{user_id}", timeout=20)
+        if r.status_code == 200:
             st.success("🧹 Historial borrado correctamente.")
             st.session_state["messages"] = []
             st.rerun()
-        else:
-            st.error("No se pudo borrar el historial.")
     except Exception as e:
         st.error(f"Error al borrar historial: {e}")
 
@@ -60,16 +53,15 @@ def limpiar_historial(user_id: str):
 # LOGIN
 # =========================================================
 def login():
-    """Renderiza formulario de login."""
     st.title("🔐 Acceso al Chat Comercial")
-    username = st.text_input("Usuario")
-    password = st.text_input("Contraseña", type="password")
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
     if st.button("Iniciar sesión"):
-        if username in USERS and password == USERS[username]:
+        if u in USERS and p == USERS[u]:
             st.session_state["auth"] = True
-            st.session_state["user"] = username
+            st.session_state["user"] = u
             st.session_state["messages"] = []
-            st.success(f"Bienvenido, {username} 👋")
+            st.success(f"Bienvenido, {u} 👋")
             st.rerun()
         else:
             st.error("Usuario o contraseña incorrectos.")
@@ -79,76 +71,139 @@ def login():
 # APLICACIÓN PRINCIPAL
 # =========================================================
 def main():
-    st.set_page_config(page_title="MCP Chat", page_icon="💬", layout="centered")
+    st.set_page_config(page_title="MCP Chat", page_icon="💬", layout="wide")
     st.title("💬 Chat de Análisis Comercial (MCP + IA)")
 
     user_id = st.session_state.get("user", "anon")
 
-    # --- SIDEBAR ---
+    # Inicializamos variable temporal para reutilización
+    if "reuse_prompt" not in st.session_state:
+        st.session_state["reuse_prompt"] = None
+
+    # === SIDEBAR ===
     with st.sidebar:
         st.subheader("📋 Panel lateral")
-
-        # Info de usuario
         st.markdown(f"👤 **Usuario:** `{user_id}`")
 
-        # Última actualización
-        ultima_fecha = obtener_ultima_actualizacion()
-        if ultima_fecha:
-            st.markdown(f"📅 **Datos actualizados al:** `{ultima_fecha}`")
+        ultima = obtener_ultima_actualizacion()
+        if ultima:
+            st.markdown(f"📅 **Datos actualizados al:** `{ultima}`")
         else:
             st.warning("⚠️ No se pudo determinar la fecha de datos.")
 
-        # Historial de chat
-        st.markdown("### 🧠 Historial reciente")
+        # === Historial ===
+        st.markdown("### 🕓 Historial de conversaciones")
         historial = obtener_historial(user_id)
-        if historial:
-            for item in historial:
-                fecha = item.get("timestamp", "")[:16]
-                prompt = item.get("prompt", "-")
-                resp = item.get("response", "-")
-                with st.expander(f"{prompt[:40]}..."):
-                    st.markdown(f"**🗨️ Pregunta:** {prompt}")
-                    st.markdown(f"**🤖 Respuesta:** {resp}")
-                    st.badge(f"Fecha: {fecha}", icon=":material/schedule:", color="blue")
-#                    if item.get("sql"):
-#                        st.code(item["sql"], language="sql")
-        else:
-            st.info("Sin historial disponible.")
 
-        # Botones
+        if not historial:
+            st.info("Sin conversaciones previas.")
+        else:
+            for h in reversed(historial):
+                fecha = h.get("timestamp", "")
+                prompt = h.get("prompt", "")
+                resp = h.get("response", "")
+                with st.expander(f"📅 {fecha[:16]} — {prompt[:50]}"):
+                    st.markdown(f"**🧍 Pregunta:** {prompt}")
+                    st.markdown(f"**💬 Respuesta:** {resp[:400]}…")
+                    if h.get("sql"):
+                        st.code(h["sql"], language="sql")
+
+                    # 🔁 Guardamos en session_state y forzamos rerun
+                    if st.button("🔁 Reutilizar", key=f"reuse_{fecha}_{prompt[:10]}"):
+                        st.session_state["reuse_prompt"] = prompt
+                        st.rerun()
+
+        st.markdown("### 📈 Estadísticas de uso")
+
+        try:
+            resp = requests.get(f"{API_URL}/metrics/usage", timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+
+                # Totales por usuario
+                st.subheader("👥 Consultas por usuario")
+                for item in data["usuarios"]:
+                    st.markdown(f"- **{item['user']}** → {item['total']} preguntas")
+
+                # Top 5 preguntas
+                st.subheader("💬 Preguntas más repetidas")
+                for t in data["top5"]:
+                    st.markdown(f"• {t['prompt']} ({t['repeticiones']} veces)")
+
+                # Gráfico de actividad diaria
+                df = None
+                try:
+                    import pandas as pd
+                    df = pd.DataFrame(data["por_dia"])
+                    df["fecha"] = pd.to_datetime(df["fecha"])
+                    st.line_chart(df.set_index("fecha")["total"])
+                except Exception:
+                    st.info("No hay suficientes datos para graficar.")
+
+            else:
+                st.warning("No se pudieron cargar métricas.")
+        except Exception as e:
+            st.error(f"Error cargando métricas: {e}")
+
+
+        st.markdown("---")
         if st.button("🧹 Borrar historial"):
             limpiar_historial(user_id)
-
         if st.button("🚪 Cerrar sesión"):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
             st.rerun()
 
-    # --- CHAT CENTRAL ---
+    # === CHAT CENTRAL ===
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
-    for msg in st.session_state["messages"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if prompt := st.chat_input("Escribí tu pregunta..."):
+    # Si se presionó reutilizar, inyectamos la pregunta
+    if st.session_state.get("reuse_prompt"):
+        prompt = st.session_state["reuse_prompt"]
+        st.session_state["reuse_prompt"] = None
         st.chat_message("user").markdown(prompt)
         st.session_state["messages"].append({"role": "user", "content": prompt})
-
         with st.spinner("Analizando..."):
             try:
                 payload = {"prompt": prompt, "user_id": user_id}
-                resp = requests.post(f"{API_URL}/chat", json=payload, timeout=60).json()
-                if "response" in resp:
-                    body = f"**SQL generada:**\n```sql\n{resp.get('sql','')}\n```\n"
-                    body += f"**Respuesta:**\n{resp['response']}\n"
+                r = requests.post(f"{API_URL}/chat", json=payload, timeout=60)
+                if r.status_code == 200:
+                    data = r.json()
+                    body = f"**SQL generada:**\n```sql\n{data.get('sql','')}\n```\n"
+                    body += f"**Respuesta:**\n{data.get('response','')}\n"
                     st.chat_message("assistant").markdown(body)
                     st.session_state["messages"].append(
                         {"role": "assistant", "content": body}
                     )
                 else:
-                    st.error(resp)
+                    st.error(r.text)
+            except Exception as e:
+                st.error(f"Error de conexión: {e}")
+
+    # Renderiza historial actual
+    for m in st.session_state["messages"]:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # Entrada de texto normal
+    if prompt := st.chat_input("Escribí tu pregunta..."):
+        st.chat_message("user").markdown(prompt)
+        st.session_state["messages"].append({"role": "user", "content": prompt})
+        with st.spinner("Analizando..."):
+            try:
+                payload = {"prompt": prompt, "user_id": user_id}
+                r = requests.post(f"{API_URL}/chat", json=payload, timeout=60)
+                if r.status_code == 200:
+                    data = r.json()
+                    body = f"**SQL generada:**\n```sql\n{data.get('sql','')}\n```\n"
+                    body += f"**Respuesta:**\n{data.get('response','')}\n"
+                    st.chat_message("assistant").markdown(body)
+                    st.session_state["messages"].append(
+                        {"role": "assistant", "content": body}
+                    )
+                else:
+                    st.error(r.text)
             except Exception as e:
                 st.error(f"Error de conexión: {e}")
 
